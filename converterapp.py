@@ -1,5 +1,26 @@
 import streamlit as st
-from bs4 import BeautifulSoup
+
+# Try to import BeautifulSoup with error handling
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+    st.error("""
+    ⚠️ **Missing Required Package: beautifulsoup4**
+    
+    **For Streamlit Cloud:**
+    1. Make sure `requirements.txt` is in your GitHub repository root
+    2. The file should contain: `beautifulsoup4==4.12.3`
+    3. Click 'Reboot app' in Streamlit Cloud
+    4. Wait 2-3 minutes for installation
+    
+    **For Local Use:**
+    ```bash
+    pip install beautifulsoup4 lxml
+    ```
+    """)
+    st.stop()
 
 def fix_html_content(html_content):
     """Fix nested <p> tags in WordPress HTML content"""
@@ -41,6 +62,13 @@ st.set_page_config(
 
 st.title("WordPress HTML Content Fixer")
 st.markdown("Fix nested `<p>` tags in your WordPress content")
+
+# Show package status
+with st.expander("📦 System Status", expanded=False):
+    if BS4_AVAILABLE:
+        st.success("✅ All required packages installed")
+    else:
+        st.error("❌ beautifulsoup4 is missing")
 
 col1, col2 = st.columns([1, 1])
 
