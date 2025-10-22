@@ -247,7 +247,7 @@ with st.sidebar:
     """)
     
     st.markdown("---")
-    st.success("Made with ❤️ for WordPress developers")
+    st.success("Made with ❤️ for BN Content Team")
 
 # Footer
 st.markdown("---")
