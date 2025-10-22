@@ -1,121 +1,108 @@
 import streamlit as st
-import re
+from bs4 import BeautifulSoup
 
-def fix_code(code):
-    """Fix nested <p> tag issues in Gutenberg block converter code"""
+def fix_html_content(html_content):
+    """Fix nested <p> tags in WordPress HTML content"""
     
-    # Fix paragraph blocks
-    paragraph_patterns = [
-        (
-            'inner_html = element.decode_contents()\n                    if inner_html.strip():\n                        block = f"<!-- wp:paragraph -->\\n<p>{inner_html}</p>\\n<!-- /wp:paragraph -->"\n                        blocks.append(block)',
-            'inner_html = element.decode_contents()\n                    if inner_html.strip():\n                        soup_inner = BeautifulSoup(inner_html, \'html.parser\')\n                        for nested_p in soup_inner.find_all(\'p\'):\n                            nested_p.unwrap()\n                        cleaned_inner_html = str(soup_inner)\n                        block = f"<!-- wp:paragraph -->\\n<p>{cleaned_inner_html}</p>\\n<!-- /wp:paragraph -->"\n                        blocks.append(block)'
-        ),
-        (
-            'if inner_html.strip():\n                        block = f"<!-- wp:paragraph -->\\n<p>{inner_html}</p>\\n<!-- /wp:paragraph -->"',
-            'if inner_html.strip():\n                        soup_inner = BeautifulSoup(inner_html, \'html.parser\')\n                        for nested_p in soup_inner.find_all(\'p\'):\n                            nested_p.unwrap()\n                        cleaned_inner_html = str(soup_inner)\n                        block = f"<!-- wp:paragraph -->\\n<p>{cleaned_inner_html}</p>\\n<!-- /wp:paragraph -->"'
-        ),
-    ]
+    # Parse the HTML
+    soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Fix blockquote blocks
-    quote_patterns = [
-        (
-            'quote_content = element.decode_contents()\n                    if quote_content.strip():\n                        block = f\'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{quote_content}</p></blockquote>\\n<!-- /wp:quote -->\'\n                        blocks.append(block)',
-            'quote_content = element.decode_contents()\n                    if quote_content.strip():\n                        soup_quote = BeautifulSoup(quote_content, \'html.parser\')\n                        for nested_p in soup_quote.find_all(\'p\'):\n                            nested_p.unwrap()\n                        cleaned_quote_content = str(soup_quote)\n                        block = f\'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{cleaned_quote_content}</p></blockquote>\\n<!-- /wp:quote -->\'\n                        blocks.append(block)'
-        ),
-    ]
+    # Find all paragraph tags
+    for p_tag in soup.find_all('p'):
+        # Check if there are nested <p> tags inside
+        nested_p_tags = p_tag.find_all('p')
+        
+        if nested_p_tags:
+            # Unwrap each nested <p> tag (remove the tag but keep its content)
+            for nested_p in nested_p_tags:
+                nested_p.unwrap()
     
-    # Apply fixes
-    for old, new in paragraph_patterns:
-        if old in code:
-            code = code.replace(old, new)
-    
-    for old, new in quote_patterns:
-        if old in code:
-            code = code.replace(old, new)
-    
-    return code
+    # Return the cleaned HTML
+    return str(soup)
 
-def analyze_code(code):
-    """Analyze code for issues"""
-    issues = []
+def count_issues(html_content):
+    """Count how many nested <p> tag issues exist"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    issue_count = 0
     
-    has_paragraph_issue = 'block = f"<!-- wp:paragraph -->\\n<p>{inner_html}</p>\\n<!-- /wp:paragraph -->"' in code
-    has_paragraph_fix = 'soup_inner = BeautifulSoup(inner_html' in code
+    for p_tag in soup.find_all('p'):
+        nested_p_tags = p_tag.find_all('p')
+        if nested_p_tags:
+            issue_count += len(nested_p_tags)
     
-    has_quote_issue = 'block = f\'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{quote_content}</p></blockquote>\\n<!-- /wp:quote -->\'' in code
-    has_quote_fix = 'soup_quote = BeautifulSoup(quote_content' in code
-    
-    if has_paragraph_issue and not has_paragraph_fix:
-        issues.append("Paragraph blocks need fixing")
-    elif has_paragraph_issue and has_paragraph_fix:
-        issues.append("Paragraph blocks already fixed")
-    
-    if has_quote_issue and not has_quote_fix:
-        issues.append("Blockquote blocks need fixing")
-    elif has_quote_issue and has_quote_fix:
-        issues.append("Blockquote blocks already fixed")
-    
-    return issues
+    return issue_count
 
 # Streamlit App
 st.set_page_config(
-    page_title="Gutenberg Code Fixer",
+    page_title="HTML Content Fixer",
     page_icon="🔧",
     layout="wide"
 )
 
-st.title("WordPress Gutenberg Block Fixer")
-st.markdown("Fix nested `<p>` tag issues in your Gutenberg block converter")
+st.title("WordPress HTML Content Fixer")
+st.markdown("Fix nested `<p>` tags in your WordPress content")
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("Input Code")
-    input_code = st.text_area(
-        "Paste your convert_html_to_gutenberg_blocks function:",
+    st.subheader("Input HTML")
+    input_html = st.text_area(
+        "Paste your WordPress HTML content:",
         height=500,
-        placeholder="Paste function code here...",
+        placeholder="Paste HTML content here...",
         label_visibility="visible"
     )
     
-    if st.button("Fix Code", type="primary", use_container_width=True):
-        if input_code:
-            st.session_state['input_code'] = input_code
-            st.session_state['fixed_code'] = fix_code(input_code)
-            st.session_state['issues'] = analyze_code(input_code)
+    if st.button("Fix HTML", type="primary", use_container_width=True):
+        if input_html:
+            issue_count = count_issues(input_html)
+            st.session_state['input_html'] = input_html
+            st.session_state['fixed_html'] = fix_html_content(input_html)
+            st.session_state['issue_count'] = issue_count
         else:
-            st.warning("Please paste your code first")
+            st.warning("Please paste your HTML content first")
 
 with col2:
-    st.subheader("Fixed Code")
+    st.subheader("Fixed HTML")
     
-    if 'fixed_code' in st.session_state:
-        # Show analysis
-        issues = st.session_state['issues']
-        if issues:
-            for issue in issues:
-                if "need fixing" in issue:
-                    st.warning(f"⚠️ {issue}")
-                else:
-                    st.success(f"✅ {issue}")
+    if 'fixed_html' in st.session_state:
+        # Show issue count
+        issue_count = st.session_state['issue_count']
+        if issue_count > 0:
+            st.warning(f"⚠️ Found and fixed {issue_count} nested <p> tag(s)")
         else:
-            st.success("✅ No issues found")
+            st.success("✅ No nested <p> tags found")
         
         st.markdown("---")
         
-        # Display fixed code
-        st.code(st.session_state['fixed_code'], language='python', line_numbers=True)
+        # Show before/after example
+        if issue_count > 0:
+            with st.expander("Example Fix", expanded=True):
+                col_before, col_after = st.columns(2)
+                
+                with col_before:
+                    st.markdown("**Before:**")
+                    st.code('<p><span><p>Content</p></span></p>', language='html')
+                
+                with col_after:
+                    st.markdown("**After:**")
+                    st.code('<p><span>Content</span></p>', language='html')
+        
+        st.markdown("---")
+        
+        # Display fixed HTML
+        st.code(st.session_state['fixed_html'], language='html')
         
         # Download button
         st.download_button(
-            label="Download Fixed Code",
-            data=st.session_state['fixed_code'],
-            file_name="fixed_gutenberg_converter.py",
-            mime="text/x-python",
+            label="Download Fixed HTML",
+            data=st.session_state['fixed_html'],
+            file_name="fixed_wordpress_content.html",
+            mime="text/html",
             use_container_width=True
         )
     else:
-        st.info("Paste your code and click 'Fix Code'")
+        st.info("Paste your HTML and click 'Fix HTML'")
 
 st.markdown("---")
-st.caption("Fixes: `<p><span><p>content</p></span></p>` → `<p><span>content</span></p>`")
+st.caption("Removes nested paragraph tags to fix WordPress editor errors")
