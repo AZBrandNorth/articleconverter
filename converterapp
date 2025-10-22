@@ -1,0 +1,258 @@
+import streamlit as st
+import re
+
+def fix_paragraph_block(code):
+    """Fix the paragraph block section to remove nested <p> tags"""
+    
+    # Pattern to find the problematic paragraph block code
+    old_pattern = r'''if element_name == 'p':
+                    # Convert paragraphs to paragraph blocks
+                    inner_html = element\.decode_contents\(\)
+                    if inner_html\.strip\(\):
+                        block = f"<!-- wp:paragraph -->\\n<p>\{inner_html\}</p>\\n<!-- /wp:paragraph -->"
+                        blocks\.append\(block\)'''
+    
+    new_code = '''if element_name == 'p':
+                    # Convert paragraphs to paragraph blocks
+                    inner_html = element.decode_contents()
+                    if inner_html.strip():
+                        # FIXED: Remove any nested <p> tags from inner_html to prevent nesting
+                        soup_inner = BeautifulSoup(inner_html, 'html.parser')
+                        for nested_p in soup_inner.find_all('p'):
+                            nested_p.unwrap()
+                        cleaned_inner_html = str(soup_inner)
+                        block = f"<!-- wp:paragraph -->\\n<p>{cleaned_inner_html}</p>\\n<!-- /wp:paragraph -->"
+                        blocks.append(block)'''
+    
+    code = re.sub(old_pattern, new_code, code)
+    
+    return code
+
+def fix_blockquote_block(code):
+    """Fix the blockquote block section to remove nested <p> tags"""
+    
+    # Pattern to find the problematic blockquote block code
+    old_pattern = r'''elif element_name == 'blockquote':
+                    # Convert blockquotes to quote blocks
+                    quote_content = element\.decode_contents\(\)
+                    if quote_content\.strip\(\):
+                        block = f'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>\{quote_content\}</p></blockquote>\\n<!-- /wp:quote -->'
+                        blocks\.append\(block\)'''
+    
+    new_code = '''elif element_name == 'blockquote':
+                    # Convert blockquotes to quote blocks
+                    quote_content = element.decode_contents()
+                    if quote_content.strip():
+                        # FIXED: Remove any nested <p> tags from quote_content to prevent nesting
+                        soup_quote = BeautifulSoup(quote_content, 'html.parser')
+                        for nested_p in soup_quote.find_all('p'):
+                            nested_p.unwrap()
+                        cleaned_quote_content = str(soup_quote)
+                        block = f'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{cleaned_quote_content}</p></blockquote>\\n<!-- /wp:quote -->'
+                        blocks.append(block)'''
+    
+    code = re.sub(old_pattern, new_code, code)
+    
+    return code
+
+def simple_fix(code):
+    """A simpler approach - just replace the specific lines"""
+    
+    # Fix paragraph blocks
+    if 'block = f"<!-- wp:paragraph -->\\n<p>{inner_html}</p>\\n<!-- /wp:paragraph -->"' in code:
+        # Find and replace the paragraph block section
+        old_para = '''inner_html = element.decode_contents()
+                    if inner_html.strip():
+                        block = f"<!-- wp:paragraph -->\\n<p>{inner_html}</p>\\n<!-- /wp:paragraph -->"
+                        blocks.append(block)'''
+        
+        new_para = '''inner_html = element.decode_contents()
+                    if inner_html.strip():
+                        # FIXED: Remove any nested <p> tags from inner_html to prevent nesting
+                        soup_inner = BeautifulSoup(inner_html, 'html.parser')
+                        for nested_p in soup_inner.find_all('p'):
+                            nested_p.unwrap()
+                        cleaned_inner_html = str(soup_inner)
+                        block = f"<!-- wp:paragraph -->\\n<p>{cleaned_inner_html}</p>\\n<!-- /wp:paragraph -->"
+                        blocks.append(block)'''
+        
+        code = code.replace(old_para, new_para)
+    
+    # Fix blockquote blocks
+    if 'block = f\'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{quote_content}</p></blockquote>\\n<!-- /wp:quote -->\'' in code:
+        old_quote = '''quote_content = element.decode_contents()
+                    if quote_content.strip():
+                        block = f'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{quote_content}</p></blockquote>\\n<!-- /wp:quote -->'
+                        blocks.append(block)'''
+        
+        new_quote = '''quote_content = element.decode_contents()
+                    if quote_content.strip():
+                        # FIXED: Remove any nested <p> tags from quote_content to prevent nesting
+                        soup_quote = BeautifulSoup(quote_content, 'html.parser')
+                        for nested_p in soup_quote.find_all('p'):
+                            nested_p.unwrap()
+                        cleaned_quote_content = str(soup_quote)
+                        block = f'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{cleaned_quote_content}</p></blockquote>\\n<!-- /wp:quote -->'
+                        blocks.append(block)'''
+        
+        code = code.replace(old_quote, new_quote)
+    
+    return code
+
+def analyze_code(code):
+    """Analyze the code to detect issues"""
+    issues = []
+    
+    if 'block = f"<!-- wp:paragraph -->\\n<p>{inner_html}</p>\\n<!-- /wp:paragraph -->"' in code:
+        issues.append("⚠️ Found problematic paragraph block code (nested <p> tags issue)")
+    
+    if 'block = f\'<!-- wp:quote -->\\n<blockquote class="wp-block-quote"><p>{quote_content}</p></blockquote>\\n<!-- /wp:quote -->\'' in code:
+        issues.append("⚠️ Found problematic blockquote block code (nested <p> tags issue)")
+    
+    if 'soup_inner = BeautifulSoup(inner_html, \'html.parser\')' in code:
+        issues.append("✅ Paragraph block already has nested tag fix")
+    
+    if 'soup_quote = BeautifulSoup(quote_content, \'html.parser\')' in code:
+        issues.append("✅ Blockquote block already has nested tag fix")
+    
+    return issues
+
+# Streamlit App
+st.set_page_config(
+    page_title="WordPress Gutenberg Code Fixer",
+    page_icon="🔧",
+    layout="wide"
+)
+
+st.title("🔧 WordPress Gutenberg Block Converter Fixer")
+st.markdown("""
+This tool fixes the nested `<p>` tag issue in WordPress Gutenberg block converter functions.
+
+**Problem:** Google Docs exports HTML with nested paragraph tags that break WordPress visual editor.  
+**Solution:** This tool automatically adds code to unwrap nested tags before creating Gutenberg blocks.
+""")
+
+# Create two columns
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("📥 Input: Your Old Code")
+    st.markdown("Paste your `convert_html_to_gutenberg_blocks` function here:")
+    
+    input_code = st.text_area(
+        "Code Input",
+        height=500,
+        placeholder="Paste your function code here...",
+        label_visibility="collapsed"
+    )
+    
+    if st.button("🔍 Analyze & Fix Code", type="primary", use_container_width=True):
+        if input_code:
+            st.session_state['input_code'] = input_code
+            st.session_state['fixed_code'] = simple_fix(input_code)
+            st.session_state['issues'] = analyze_code(input_code)
+        else:
+            st.warning("Please paste your code first!")
+
+with col2:
+    st.subheader("📤 Output: Fixed Code")
+    
+    if 'fixed_code' in st.session_state:
+        # Show analysis
+        st.markdown("#### 🔍 Analysis Results:")
+        for issue in st.session_state['issues']:
+            if "⚠️" in issue:
+                st.warning(issue)
+            else:
+                st.success(issue)
+        
+        st.markdown("---")
+        st.markdown("#### ✅ Fixed Code:")
+        
+        # Display fixed code
+        st.code(st.session_state['fixed_code'], language='python', line_numbers=True)
+        
+        # Download button
+        st.download_button(
+            label="📥 Download Fixed Code",
+            data=st.session_state['fixed_code'],
+            file_name="fixed_gutenberg_converter.py",
+            mime="text/x-python",
+            use_container_width=True
+        )
+        
+        # Show changes
+        with st.expander("📋 What Changed?"):
+            st.markdown("""
+            **Changes Applied:**
+            
+            1. **Paragraph Blocks Fix:**
+               - Added code to detect nested `<p>` tags
+               - Unwraps nested tags using BeautifulSoup
+               - Produces clean HTML structure
+            
+            2. **Blockquote Blocks Fix:**
+               - Added code to detect nested `<p>` tags in quotes
+               - Unwraps nested tags using BeautifulSoup
+               - Produces clean HTML structure
+            
+            **Why This Fixes WordPress:**
+            - WordPress visual editor cannot parse nested `<p>` tags
+            - Shows "Block contains unexpected or invalid content" error
+            - This fix prevents the nesting issue at the source
+            """)
+    else:
+        st.info("👈 Paste your code in the left panel and click 'Analyze & Fix Code'")
+
+# Sidebar with information
+with st.sidebar:
+    st.header("ℹ️ About This Tool")
+    st.markdown("""
+    ### What Does This Fix?
+    
+    This tool fixes WordPress Gutenberg block converters that create nested paragraph tags.
+    
+    ### The Problem
+    ```html
+    <!-- Bad: Nested <p> tags -->
+    <p><span><p>content</p></span></p>
+    ```
+    
+    ### The Solution
+    ```html
+    <!-- Good: Clean structure -->
+    <p><span>content</span></p>
+    ```
+    
+    ### When to Use This
+    - WordPress visual editor shows errors
+    - Content appears fine in code editor
+    - Google Docs export creates issues
+    - Posts won't save or publish correctly
+    
+    ### Technical Details
+    The fix uses BeautifulSoup to:
+    1. Parse inner HTML content
+    2. Find all nested `<p>` tags
+    3. Unwrap them (remove tag, keep content)
+    4. Return clean HTML
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 📚 Resources")
+    st.markdown("""
+    - [WordPress Block Editor](https://wordpress.org/gutenberg/)
+    - [BeautifulSoup Docs](https://www.crummy.com/software/BeautifulSoup/)
+    - [HTML Validation](https://validator.w3.org/)
+    """)
+    
+    st.markdown("---")
+    st.success("Made with ❤️ for WordPress developers")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center'>
+    <p>💡 <strong>Pro Tip:</strong> Always test your fixed code in a development environment first!</p>
+</div>
+""", unsafe_allow_html=True)
