@@ -212,18 +212,6 @@ with st.sidebar:
     
     This tool fixes WordPress Gutenberg block converters that create nested paragraph tags.
     
-    ### The Problem
-    ```html
-    <!-- Bad: Nested <p> tags -->
-    <p><span><p>content</p></span></p>
-    ```
-    
-    ### The Solution
-    ```html
-    <!-- Good: Clean structure -->
-    <p><span>content</span></p>
-    ```
-    
     ### When to Use This
     - WordPress visual editor shows errors
     - Content appears fine in code editor
@@ -236,14 +224,6 @@ with st.sidebar:
     2. Find all nested `<p>` tags
     3. Unwrap them (remove tag, keep content)
     4. Return clean HTML
-    """)
-    
-    st.markdown("---")
-    st.markdown("### 📚 Resources")
-    st.markdown("""
-    - [WordPress Block Editor](https://wordpress.org/gutenberg/)
-    - [BeautifulSoup Docs](https://www.crummy.com/software/BeautifulSoup/)
-    - [HTML Validation](https://validator.w3.org/)
     """)
     
     st.markdown("---")
