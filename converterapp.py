@@ -2,7 +2,8 @@
 # WordPress HTML Content Fixer
 # - Removes nested <p>, optional empty <p>, and <p> wrapping block elements
 # - Preserves Gutenberg block comments, strips document wrapper
-# - Removes empty Gutenberg blocks (<!-- wp:* --> ... <!-- /wp:* -->)
+# - Removes empty Gutenberg blocks (<!-- wp:* -->...<!-- /wp:* -->)
+# - Removes <p> wrappers that contain ONLY Gutenberg comments (and optional <br>/whitespace)
 
 import streamlit as st
 
@@ -51,16 +52,20 @@ BLOCK_LEVEL_TAGS = {
     "blockquote", "pre", "hr",
     "h1", "h2", "h3", "h4", "h5", "h6"
 }
-NON_EMPTY_INLINE_OK = {"img", "br", "svg", "iframe", "video", "audio", "canvas", "embed", "object"}
+# NOTE: <br> is intentionally EXCLUDED so <p><br></p> is considered empty.
+NON_EMPTY_INLINE_OK = {"img", "svg", "iframe", "video", "audio", "canvas", "embed", "object"}
 
 def pick_parser() -> str:
     return PARSER_ORDER[0] if PARSER_ORDER else "html.parser"
 
 def is_effectively_empty(tag: Tag) -> bool:
-    """True if <p> has no visible text and no meaningful inline content."""
+    """True if <p> has no visible text and no meaningful inline content (br is ignored)."""
     for child in tag.children:
-        if isinstance(child, Tag) and child.name in NON_EMPTY_INLINE_OK:
-            return False
+        if isinstance(child, Tag):
+            if child.name == "br":
+                continue  # ignore line breaks
+            if child.name in NON_EMPTY_INLINE_OK:
+                return False
         if isinstance(child, NavigableString) and child.strip():
             return False
     text = tag.get_text(separator="", strip=True)
@@ -85,16 +90,42 @@ def unwrap_p_around_block(p_tag: Tag) -> int:
             return 1
     return 0
 
+def p_is_wp_comment_wrapper(p: Tag) -> bool:
+    """
+    Return True if this <p> contains ONLY:
+      - Gutenberg comments like <!-- wp:... --> or <!-- /wp:... -->
+      - optional <br> tags
+      - whitespace / NBSP
+    """
+    for child in p.contents:
+        if isinstance(child, NavigableString):
+            if str(child).replace("\xa0", " ").strip():
+                return False
+        elif isinstance(child, Comment):
+            s = str(child).strip()
+            if not (s.startswith("wp:") or s.startswith("/wp:")):
+                return False
+        elif isinstance(child, Tag):
+            if child.name == "br":
+                continue
+            # any other tag means it's not a pure wrapper
+            return False
+        else:
+            return False
+    return True
+
 def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_wrapped_p: bool):
     """
     Recursively:
       - Unwrap nested <p> inside <p>
+      - Remove <p> that are ONLY Gutenberg comment wrappers (and optional <br>/whitespace)
       - Optionally remove empty <p>
       - Optionally unwrap <p> that wrap block-level elements
     """
     total_nested_fixes = 0
     total_empty_removed = 0
     total_unwrapped_block = 0
+    total_wp_comment_wrapper_removed = 0
     changed = True
     safety_counter = 0
 
@@ -103,11 +134,20 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
         safety_counter += 1
         p_tags = list(soup.find_all("p"))
         for p in p_tags:
+            # 1) remove pure Gutenberg-comment wrappers
+            if p_is_wp_comment_wrapper(p):
+                p.decompose()
+                total_wp_comment_wrapper_removed += 1
+                changed = True
+                continue
+
+            # 2) unwrap nested <p> within <p>
             nested_count = unwrap_children(p, "p")
             if nested_count:
                 total_nested_fixes += nested_count
                 changed = True
 
+            # 3) unwrap <p> that contains block elements
             if unwrap_block_wrapped_p and p.parent:
                 unwrapped = unwrap_p_around_block(p)
                 if unwrapped:
@@ -115,6 +155,7 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
                     changed = True
                     continue  # p was unwrapped; don't touch further
 
+            # 4) remove empty <p>
             if remove_empty and p and p.name == "p" and is_effectively_empty(p):
                 p.decompose()
                 total_empty_removed += 1
@@ -124,6 +165,7 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
         "nested_p_fixed": total_nested_fixes,
         "empty_p_removed": total_empty_removed,
         "block_wraps_unwrapped": total_unwrapped_block,
+        "wp_comment_wrapper_removed": total_wp_comment_wrapper_removed,
         "iterations": safety_counter
     }
 
@@ -134,6 +176,7 @@ def _node_has_visible_content(node: object) -> bool:
     if isinstance(node, Comment):
         return False
     if isinstance(node, Tag):
+        # consider only truly visible media; <br> alone isn't content
         if node.name in {"img", "svg", "video", "audio", "canvas", "iframe", "object", "embed"}:
             return True
         if node.get_text(strip=True):
@@ -148,7 +191,7 @@ def _node_has_visible_content(node: object) -> bool:
 
 def remove_empty_gutenberg_blocks(soup: BeautifulSoup) -> int:
     """
-    Remove empty Gutenberg blocks:
+    Remove empty Gutenberg blocks at the top level:
       <!-- wp:paragraph -->
       [only whitespace/empty nodes]
       <!-- /wp:paragraph -->
@@ -190,13 +233,21 @@ def analyze_issues(html: str, parser: str):
     nested = 0
     block_wraps = 0
     empties = 0
+    wp_comment_wrappers = 0
     for p in soup.find_all("p"):
         nested += len(p.find_all("p"))
         if any(isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS for c in p.children):
             block_wraps += 1
         if is_effectively_empty(p):
             empties += 1
-    return {"nested_p": nested, "p_wrapping_blocks": block_wraps, "empty_p": empties}
+        if p_is_wp_comment_wrapper(p):
+            wp_comment_wrappers += 1
+    return {
+        "nested_p": nested,
+        "p_wrapping_blocks": block_wraps,
+        "empty_p": empties,
+        "wp_comment_wrappers": wp_comment_wrappers
+    }
 
 def serialize_fragment(soup: BeautifulSoup, strip_document_wrapper: bool = True, prettify: bool = False) -> str:
     """
@@ -205,7 +256,7 @@ def serialize_fragment(soup: BeautifulSoup, strip_document_wrapper: bool = True,
     """
     def to_html(node) -> str:
         if isinstance(node, Comment):
-            return f"<!-- {node} -->"  # BeautifulSoup loses the delimiters if we don't add them
+            return f"<!-- {node} -->"
         return str(node)
 
     if strip_document_wrapper and getattr(soup, "body", None):
@@ -253,9 +304,9 @@ def fix_html_content(
 # ---------------- UI ----------------
 st.title("WordPress HTML Content Fixer")
 st.markdown(
-    "Fix nested `<p>` tags, optionally remove empty `<p>`, unwrap `<p>` around block elements, "
+    "Fix nested `<p>` tags, remove empty/bridge `<p>`, unwrap `<p>` around block elements, "
     "and output a **Gutenberg-safe fragment** (preserves block comments, no `<html>/<body>`). "
-    "Now also removes **empty Gutenberg blocks**."
+    "Also removes **empty Gutenberg blocks** and `<p>` wrappers that contain only Gutenberg comments."
 )
 
 with st.expander("📦 System Status", expanded=False):
@@ -342,6 +393,7 @@ with col2:
                 f"Fixed nested `<p>`: **{after_stats['nested_p_fixed']}** • "
                 f"Unwrapped `<p>` around blocks: **{after_stats['block_wraps_unwrapped']}** • "
                 f"Removed empty `<p>`: **{after_stats['empty_p_removed']}** • "
+                f"Removed wp-comment-only `<p>`: **{after_stats['wp_comment_wrapper_removed']}** • "
                 f"Removed empty Gutenberg blocks: **{after_stats['empty_wp_blocks_removed']}** • "
                 f"Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
             )
@@ -363,4 +415,4 @@ with col2:
         st.info("Paste HTML or upload files, adjust settings, and click **Fix HTML**.")
 
 st.markdown("---")
-st.caption("Preserves Gutenberg comments, removes nested/empty <p>, unwraps invalid structures, strips document wrapper, and deletes empty Gutenberg blocks.")
+st.caption("Preserves Gutenberg comments, removes nested/empty/bridge <p>, unwraps invalid structures, strips document wrapper, and deletes empty Gutenberg blocks.")
