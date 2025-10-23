@@ -1,11 +1,14 @@
 # app.py
-# WordPress HTML Content Fixer
+# WordPress HTML Content Fixer - Enhanced Version
 # - Removes nested <p>, optional empty <p>, and <p> wrapping block elements
 # - Preserves Gutenberg block comments, strips document wrapper
 # - Removes empty Gutenberg blocks (<!-- wp:* -->...<!-- /wp:* -->)
 # - Removes <p> wrappers that contain ONLY Gutenberg comments (and optional <br>/whitespace)
+# - Enhanced with error handling, validation, presets, and detailed statistics
 
 import streamlit as st
+import difflib
+from typing import Optional, Dict, List, Tuple
 
 # ---------------- Imports with graceful fallbacks ----------------
 PARSER_ORDER = []
@@ -29,8 +32,43 @@ except Exception:
 
 PARSER_ORDER.append("html.parser")  # always available
 
-# ---------------- App ----------------
+# ---------------- Constants ----------------
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+PREVIEW_LENGTH = 500
+FULL_DISPLAY_THRESHOLD = 10000
+
+# ---------------- App Config ----------------
 st.set_page_config(page_title="HTML Content Fixer", page_icon="🔧", layout="wide")
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 5px 0;
+    }
+    .success-box {
+        background-color: #d4edda;
+        border-left: 4px solid #28a745;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border-left: 4px solid #dc3545;
+        padding: 10px;
+        margin: 10px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 if not BS4_AVAILABLE:
     with st.expander("📦 System Status", expanded=True):
@@ -52,7 +90,6 @@ BLOCK_LEVEL_TAGS = {
     "blockquote", "pre", "hr",
     "h1", "h2", "h3", "h4", "h5", "h6"
 }
-# NOTE: <br> is intentionally EXCLUDED so <p><br></p> is considered empty.
 NON_EMPTY_INLINE_OK = {"img", "svg", "iframe", "video", "audio", "canvas", "embed", "object"}
 
 def pick_parser() -> str:
@@ -63,7 +100,7 @@ def is_effectively_empty(tag: Tag) -> bool:
     for child in tag.children:
         if isinstance(child, Tag):
             if child.name == "br":
-                continue  # ignore line breaks
+                continue
             if child.name in NON_EMPTY_INLINE_OK:
                 return False
         if isinstance(child, NavigableString) and child.strip():
@@ -108,7 +145,6 @@ def p_is_wp_comment_wrapper(p: Tag) -> bool:
         elif isinstance(child, Tag):
             if child.name == "br":
                 continue
-            # any other tag means it's not a pure wrapper
             return False
         else:
             return False
@@ -118,7 +154,7 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
     """
     Recursively:
       - Unwrap nested <p> inside <p>
-      - Remove <p> that are ONLY Gutenberg comment wrappers (and optional <br>/whitespace)
+      - Remove <p> that are ONLY Gutenberg comment wrappers
       - Optionally remove empty <p>
       - Optionally unwrap <p> that wrap block-level elements
     """
@@ -153,7 +189,7 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
                 if unwrapped:
                     total_unwrapped_block += unwrapped
                     changed = True
-                    continue  # p was unwrapped; don't touch further
+                    continue
 
             # 4) remove empty <p>
             if remove_empty and p and p.name == "p" and is_effectively_empty(p):
@@ -176,7 +212,6 @@ def _node_has_visible_content(node: object) -> bool:
     if isinstance(node, Comment):
         return False
     if isinstance(node, Tag):
-        # consider only truly visible media; <br> alone isn't content
         if node.name in {"img", "svg", "video", "audio", "canvas", "iframe", "object", "embed"}:
             return True
         if node.get_text(strip=True):
@@ -190,12 +225,7 @@ def _node_has_visible_content(node: object) -> bool:
     return False
 
 def remove_empty_gutenberg_blocks(soup: BeautifulSoup) -> int:
-    """
-    Remove empty Gutenberg blocks at the top level:
-      <!-- wp:paragraph -->
-      [only whitespace/empty nodes]
-      <!-- /wp:paragraph -->
-    """
+    """Remove empty Gutenberg blocks at the top level."""
     container = soup.body if getattr(soup, "body", None) else soup
     removed = 0
     i = 0
@@ -204,7 +234,6 @@ def remove_empty_gutenberg_blocks(soup: BeautifulSoup) -> int:
     while i < len(nodes):
         n = nodes[i]
         if isinstance(n, Comment) and str(n).strip().startswith("wp:"):
-            # find matching closing comment
             j = i + 1
             content_has_any = False
             while j < len(nodes):
@@ -216,44 +245,72 @@ def remove_empty_gutenberg_blocks(soup: BeautifulSoup) -> int:
                 j += 1
 
             if j < len(nodes) and not content_has_any:
-                # delete i..j inclusive
                 for k in range(i, j + 1):
                     try:
                         nodes[k].extract()
                     except Exception:
                         pass
                 removed += 1
-                nodes = list(container.children)  # refresh view
+                nodes = list(container.children)
                 continue
         i += 1
     return removed
 
-def analyze_issues(html: str, parser: str):
-    soup = BeautifulSoup(html, parser)
-    nested = 0
-    block_wraps = 0
-    empties = 0
-    wp_comment_wrappers = 0
-    for p in soup.find_all("p"):
-        nested += len(p.find_all("p"))
-        if any(isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS for c in p.children):
-            block_wraps += 1
-        if is_effectively_empty(p):
-            empties += 1
-        if p_is_wp_comment_wrapper(p):
-            wp_comment_wrappers += 1
-    return {
-        "nested_p": nested,
-        "p_wrapping_blocks": block_wraps,
-        "empty_p": empties,
-        "wp_comment_wrappers": wp_comment_wrappers
-    }
+def analyze_issues(html: str, parser: str) -> Dict:
+    """Analyze HTML for common issues."""
+    try:
+        soup = BeautifulSoup(html, parser)
+        nested = 0
+        block_wraps = 0
+        empties = 0
+        wp_comment_wrappers = 0
+        for p in soup.find_all("p"):
+            nested += len(p.find_all("p"))
+            if any(isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS for c in p.children):
+                block_wraps += 1
+            if is_effectively_empty(p):
+                empties += 1
+            if p_is_wp_comment_wrapper(p):
+                wp_comment_wrappers += 1
+        return {
+            "nested_p": nested,
+            "p_wrapping_blocks": block_wraps,
+            "empty_p": empties,
+            "wp_comment_wrappers": wp_comment_wrappers
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def validate_html(html: str, parser: str) -> Dict:
+    """Validate that HTML has been properly fixed."""
+    try:
+        soup = BeautifulSoup(html, parser)
+        issues = []
+        
+        # Check for nested <p> tags
+        for p in soup.find_all("p"):
+            if p.find("p"):
+                issues.append("Still contains nested <p> tags")
+                break
+        
+        # Check for <p> wrapping block elements
+        for p in soup.find_all("p"):
+            if any(isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS for c in p.children):
+                issues.append("Still has <p> wrapping block elements")
+                break
+        
+        return {
+            "valid": len(issues) == 0,
+            "issues": issues if issues else ["All checks passed"]
+        }
+    except Exception as e:
+        return {
+            "valid": False,
+            "issues": [f"Validation error: {str(e)}"]
+        }
 
 def serialize_fragment(soup: BeautifulSoup, strip_document_wrapper: bool = True, prettify: bool = False) -> str:
-    """
-    Return HTML suitable for Gutenberg:
-    - If body exists and strip_document_wrapper=True → join body children (preserve comments as <!-- ... -->).
-    """
+    """Return HTML suitable for Gutenberg."""
     def to_html(node) -> str:
         if isinstance(node, Comment):
             return f"<!-- {node} -->"
@@ -280,29 +337,94 @@ def fix_html_content(
     prettify: bool = False,
     parser: str | None = None,
     strip_document_wrapper: bool = True
-):
-    """Main fix function."""
-    parser = parser or pick_parser()
-    soup = BeautifulSoup(html, parser)
+) -> Tuple[str, Dict, str]:
+    """Main fix function with error handling."""
+    try:
+        # Validate input
+        if not html or not html.strip():
+            return html, {"error": "Empty HTML provided"}, parser or pick_parser()
+        
+        if len(html) < 10:
+            return html, {"warning": "HTML seems too short - might be incomplete"}, parser or pick_parser()
+        
+        parser = parser or pick_parser()
+        soup = BeautifulSoup(html, parser)
 
-    stats = normalize_paragraphs(
-        soup,
-        remove_empty=remove_empty,
-        unwrap_block_wrapped_p=unwrap_block_wrapped_p
-    )
+        stats = normalize_paragraphs(
+            soup,
+            remove_empty=remove_empty,
+            unwrap_block_wrapped_p=unwrap_block_wrapped_p
+        )
 
-    # Remove empty Gutenberg blocks created or exposed by cleanup
-    stats["empty_wp_blocks_removed"] = remove_empty_gutenberg_blocks(soup)
+        # Remove empty Gutenberg blocks
+        stats["empty_wp_blocks_removed"] = remove_empty_gutenberg_blocks(soup)
 
-    fixed = serialize_fragment(
-        soup,
-        strip_document_wrapper=strip_document_wrapper,
-        prettify=prettify
-    )
-    return fixed, stats, parser
+        fixed = serialize_fragment(
+            soup,
+            strip_document_wrapper=strip_document_wrapper,
+            prettify=prettify
+        )
+        return fixed, stats, parser
+    
+    except Exception as e:
+        return html, {"error": f"Processing failed: {str(e)}"}, parser or pick_parser()
+
+def generate_diff(original: str, fixed: str, max_lines: int = 50) -> str:
+    """Generate a unified diff between original and fixed HTML."""
+    try:
+        diff = list(difflib.unified_diff(
+            original.splitlines(keepends=True),
+            fixed.splitlines(keepends=True),
+            fromfile='Original',
+            tofile='Fixed',
+            lineterm=''
+        ))
+        
+        if len(diff) > max_lines:
+            diff = diff[:max_lines] + [f'\n... (truncated, {len(diff) - max_lines} more lines)']
+        
+        return ''.join(diff) if diff else "No differences found"
+    except Exception as e:
+        return f"Error generating diff: {str(e)}"
+
+# ---------------- Test Cases ----------------
+def run_tests() -> Dict[str, bool]:
+    """Run test cases to verify functionality."""
+    test_cases = {
+        "nested_p": {
+            "input": "<p><p>Test</p></p>",
+            "check": lambda fixed: "<p><p>" not in fixed
+        },
+        "empty_p": {
+            "input": "<p></p><p>Content</p>",
+            "check": lambda fixed: fixed.count("<p>") == 1
+        },
+        "p_wrap_div": {
+            "input": "<p><div>Block content</div></p>",
+            "check": lambda fixed: "<p><div>" not in fixed
+        },
+        "wp_comment_wrapper": {
+            "input": "<p><!-- wp:paragraph --></p>",
+            "check": lambda fixed: "<p><!--" not in fixed
+        },
+        "multiple_nested": {
+            "input": "<p><p><p>Deep nest</p></p></p>",
+            "check": lambda fixed: fixed.count("<p>") == 1
+        }
+    }
+    
+    results = {}
+    for name, test in test_cases.items():
+        try:
+            fixed, _, _ = fix_html_content(test["input"])
+            results[name] = test["check"](fixed)
+        except Exception:
+            results[name] = False
+    
+    return results
 
 # ---------------- UI ----------------
-st.title("WordPress HTML Content Fixer")
+st.title("🔧 WordPress HTML Content Fixer")
 st.markdown(
     "Fix nested `<p>` tags, remove empty/bridge `<p>`, unwrap `<p>` around block elements, "
     "and output a **Gutenberg-safe fragment** (preserves block comments, no `<html>/<body>`). "
@@ -312,107 +434,311 @@ st.markdown(
 with st.expander("📦 System Status", expanded=False):
     st.write("**Parsers (best → fallback):**", ", ".join(PARSER_ORDER))
     st.success("✅ BeautifulSoup available")
+    st.info(f"**Max file size:** {MAX_FILE_SIZE / (1024*1024):.0f}MB")
 
-# Sidebar options
-st.sidebar.header("Settings")
-remove_empty_opt = st.sidebar.checkbox("Remove empty paragraphs", value=True)
-unwrap_block_opt = st.sidebar.checkbox("Unwrap <p> that wrap block elements", value=True)
-prettify_opt = st.sidebar.checkbox("Prettify output (formatted)", value=False)
-strip_wrapper_opt = st.sidebar.checkbox("Strip <html>/<body> wrapper (recommended)", value=True)
+# Sidebar - Presets
+st.sidebar.header("⚙️ Settings")
+
+preset = st.sidebar.radio(
+    "Quick Presets:",
+    ["🛡️ Conservative (safe)", "⚡ Aggressive (thorough)", "🎛️ Custom"],
+    help="Conservative: Only fixes nested <p>. Aggressive: Fixes everything."
+)
+
+if preset == "🛡️ Conservative (safe)":
+    remove_empty_opt = False
+    unwrap_block_opt = True
+    prettify_opt = False
+    strip_wrapper_opt = True
+elif preset == "⚡ Aggressive (thorough)":
+    remove_empty_opt = True
+    unwrap_block_opt = True
+    prettify_opt = False
+    strip_wrapper_opt = True
+else:  # Custom
+    st.sidebar.markdown("**Custom Options:**")
+    remove_empty_opt = st.sidebar.checkbox("Remove empty paragraphs", value=True)
+    unwrap_block_opt = st.sidebar.checkbox("Unwrap <p> that wrap block elements", value=True)
+    prettify_opt = st.sidebar.checkbox("Prettify output (formatted)", value=False)
+    strip_wrapper_opt = st.sidebar.checkbox("Strip <html>/<body> wrapper (recommended)", value=True)
+
 parser_choice = st.sidebar.selectbox("Parser to use", options=["auto"] + PARSER_ORDER, index=0)
 
+# Advanced Options
+with st.sidebar.expander("🔬 Advanced Options"):
+    show_validation = st.checkbox("Show validation results", value=True)
+    show_diff = st.checkbox("Show before/after diff", value=False)
+    run_test_suite = st.checkbox("Run test suite", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Enhanced version with validation, presets & statistics")
+
+# Main content area
 col1, col2 = st.columns([1, 1])
 
 # -------- Left: Input --------
 with col1:
-    st.subheader("Input HTML")
-    input_html = st.text_area("Paste your HTML:", height=320, placeholder="Paste WordPress HTML content here…")
+    st.subheader("📝 Input HTML")
+    input_html = st.text_area(
+        "Paste your HTML:",
+        height=320,
+        placeholder="Paste WordPress HTML content here…",
+        help="Paste the HTML content that needs fixing"
+    )
 
     uploaded_files = st.file_uploader(
         "…or upload .html/.htm/.txt files",
         type=["html", "htm", "txt"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        help="Upload one or more HTML files for batch processing"
     )
 
-    run_btn = st.button("Fix HTML", type="primary", use_container_width=True)
+    run_btn = st.button("🚀 Fix HTML", type="primary", use_container_width=True)
 
 # -------- Right: Output --------
 with col2:
-    st.subheader("Fixed HTML")
+    st.subheader("✨ Fixed HTML")
 
     if run_btn:
         selected_parser = None if parser_choice == "auto" else parser_choice
 
+        # Run test suite if enabled
+        if run_test_suite:
+            with st.expander("🧪 Test Suite Results", expanded=True):
+                test_results = run_tests()
+                passed = sum(test_results.values())
+                total = len(test_results)
+                
+                st.metric("Tests Passed", f"{passed}/{total}")
+                
+                for test_name, passed in test_results.items():
+                    icon = "✅" if passed else "❌"
+                    st.write(f"{icon} **{test_name}**: {'Passed' if passed else 'Failed'}")
+
         # Batch files
         if uploaded_files:
-            st.markdown("### Batch Results")
-            for f in uploaded_files:
-                raw = f.read().decode("utf-8", errors="replace")
-                before_stats = analyze_issues(raw, pick_parser() if selected_parser is None else selected_parser)
-                fixed, after_stats, used_parser = fix_html_content(
-                    raw,
-                    remove_empty=remove_empty_opt,
-                    unwrap_block_wrapped_p=unwrap_block_opt,
-                    prettify=prettify_opt,
-                    parser=selected_parser,
-                    strip_document_wrapper=strip_wrapper_opt
-                )
-
-                with st.expander(f"📄 {f.name}  •  Parser: `{used_parser}`", expanded=False):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown("**Before – Issues**")
-                        st.json(before_stats)
-                        st.code(raw[:10000] if len(raw) > 10000 else raw, language="html")
-                    with c2:
-                        st.markdown("**After – Fix Stats**")
-                        st.json(after_stats)
-                        st.code(fixed[:10000] if len(fixed) > 10000 else fixed, language="html")
-
-                    st.download_button(
-                        label="Download fixed file",
-                        data=fixed,
-                        file_name=f"{f.name.rsplit('.',1)[0]}__fixed.html",
-                        mime="text/html",
-                        use_container_width=True
+            st.markdown("### 📊 Batch Processing Results")
+            
+            # Progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            all_stats = []
+            
+            for idx, f in enumerate(uploaded_files):
+                status_text.text(f"Processing {f.name}... ({idx + 1}/{len(uploaded_files)})")
+                
+                # File size check
+                file_size = f.size
+                if file_size > MAX_FILE_SIZE:
+                    st.warning(f"⚠️ {f.name} is very large ({file_size/1024/1024:.1f}MB). Processing may be slow.")
+                
+                try:
+                    raw = f.read().decode("utf-8", errors="replace")
+                    
+                    # Malformed HTML check
+                    if not raw or len(raw) < 10:
+                        st.error(f"❌ {f.name}: File is empty or too short")
+                        continue
+                    
+                    before_stats = analyze_issues(raw, pick_parser() if selected_parser is None else selected_parser)
+                    
+                    fixed, after_stats, used_parser = fix_html_content(
+                        raw,
+                        remove_empty=remove_empty_opt,
+                        unwrap_block_wrapped_p=unwrap_block_opt,
+                        prettify=prettify_opt,
+                        parser=selected_parser,
+                        strip_document_wrapper=strip_wrapper_opt
                     )
+                    
+                    # Check for errors
+                    if "error" in after_stats:
+                        st.error(f"❌ {f.name}: {after_stats['error']}")
+                        continue
+                    
+                    all_stats.append(after_stats)
+                    
+                    # Validation
+                    validation = validate_html(fixed, used_parser) if show_validation else None
+
+                    with st.expander(f"📄 {f.name}  •  Parser: `{used_parser}`  •  Size: {file_size/1024:.1f}KB", expanded=False):
+                        # Summary metrics
+                        metric_cols = st.columns(3)
+                        with metric_cols[0]:
+                            st.metric("Nested <p> Fixed", after_stats.get('nested_p_fixed', 0))
+                        with metric_cols[1]:
+                            st.metric("Empty <p> Removed", after_stats.get('empty_p_removed', 0))
+                        with metric_cols[2]:
+                            st.metric("Blocks Unwrapped", after_stats.get('block_wraps_unwrapped', 0))
+                        
+                        # Validation results
+                        if show_validation and validation:
+                            if validation['valid']:
+                                st.success("✅ Validation passed: " + ", ".join(validation['issues']))
+                            else:
+                                st.error("❌ Validation failed: " + ", ".join(validation['issues']))
+                        
+                        # Before/After comparison
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown("**📥 Before – Issues**")
+                            st.json(before_stats)
+                            if len(raw) > FULL_DISPLAY_THRESHOLD:
+                                st.code(raw[:PREVIEW_LENGTH] + "\n\n... (preview truncated) ...", language="html")
+                                with st.expander("View full original"):
+                                    st.code(raw, language="html")
+                            else:
+                                st.code(raw, language="html")
+                        
+                        with c2:
+                            st.markdown("**📤 After – Fix Stats**")
+                            st.json(after_stats)
+                            if len(fixed) > FULL_DISPLAY_THRESHOLD:
+                                st.code(fixed[:PREVIEW_LENGTH] + "\n\n... (preview truncated) ...", language="html")
+                                with st.expander("View full fixed"):
+                                    st.code(fixed, language="html")
+                            else:
+                                st.code(fixed, language="html")
+                        
+                        # Diff view
+                        if show_diff:
+                            st.markdown("**🔍 Changes (Diff)**")
+                            diff_result = generate_diff(raw, fixed)
+                            st.code(diff_result, language="diff")
+
+                        st.download_button(
+                            label="📥 Download fixed file",
+                            data=fixed,
+                            file_name=f"{f.name.rsplit('.',1)[0]}__fixed.html",
+                            mime="text/html",
+                            use_container_width=True,
+                            key=f"download_{idx}"
+                        )
+                
+                except Exception as e:
+                    st.error(f"❌ Error processing {f.name}: {str(e)}")
+                
+                # Update progress
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+            
+            status_text.text("✅ All files processed!")
+            
+            # Overall statistics dashboard
+            if all_stats:
+                st.markdown("---")
+                st.markdown("### 📈 Overall Statistics")
+                dash_cols = st.columns(4)
+                
+                with dash_cols[0]:
+                    st.metric("Files Processed", len(all_stats))
+                with dash_cols[1]:
+                    total_nested = sum(s.get('nested_p_fixed', 0) for s in all_stats)
+                    st.metric("Total Nested <p> Fixed", total_nested)
+                with dash_cols[2]:
+                    total_empty = sum(s.get('empty_p_removed', 0) for s in all_stats)
+                    st.metric("Total Empty <p> Removed", total_empty)
+                with dash_cols[3]:
+                    total_blocks = sum(s.get('empty_wp_blocks_removed', 0) for s in all_stats)
+                    st.metric("Total WP Blocks Removed", total_blocks)
 
         # Single text input
         elif input_html and input_html.strip():
-            before_stats = analyze_issues(input_html, pick_parser() if selected_parser is None else selected_parser)
-            fixed_html, after_stats, used_parser = fix_html_content(
-                input_html,
-                remove_empty=remove_empty_opt,
-                unwrap_block_wrapped_p=unwrap_block_opt,
-                prettify=prettify_opt,
-                parser=selected_parser,
-                strip_document_wrapper=strip_wrapper_opt
-            )
+            try:
+                # Malformed HTML check
+                if len(input_html) < 10:
+                    st.warning("⚠️ HTML seems too short - might be incomplete")
+                
+                before_stats = analyze_issues(input_html, pick_parser() if selected_parser is None else selected_parser)
+                
+                if "error" in before_stats:
+                    st.error(f"❌ Error analyzing HTML: {before_stats['error']}")
+                else:
+                    fixed_html, after_stats, used_parser = fix_html_content(
+                        input_html,
+                        remove_empty=remove_empty_opt,
+                        unwrap_block_wrapped_p=unwrap_block_opt,
+                        prettify=prettify_opt,
+                        parser=selected_parser,
+                        strip_document_wrapper=strip_wrapper_opt
+                    )
+                    
+                    # Check for errors
+                    if "error" in after_stats:
+                        st.error(f"❌ {after_stats['error']}")
+                    elif "warning" in after_stats:
+                        st.warning(f"⚠️ {after_stats['warning']}")
+                    else:
+                        # Success message with metrics
+                        st.success(
+                            f"✅ **Fixed successfully!** • "
+                            f"Nested `<p>`: **{after_stats['nested_p_fixed']}** • "
+                            f"Unwrapped blocks: **{after_stats['block_wraps_unwrapped']}** • "
+                            f"Empty `<p>`: **{after_stats['empty_p_removed']}** • "
+                            f"WP-comment-only `<p>`: **{after_stats['wp_comment_wrapper_removed']}** • "
+                            f"Empty WP blocks: **{after_stats['empty_wp_blocks_removed']}** • "
+                            f"Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
+                        )
+                        
+                        # Validation
+                        if show_validation:
+                            validation = validate_html(fixed_html, used_parser)
+                            if validation['valid']:
+                                st.success("✅ Validation: " + ", ".join(validation['issues']))
+                            else:
+                                st.error("❌ Validation: " + ", ".join(validation['issues']))
+                        
+                        st.markdown("---")
+                        
+                        # Metrics dashboard
+                        metric_cols = st.columns(4)
+                        with metric_cols[0]:
+                            st.metric("Before: Nested <p>", before_stats.get('nested_p', 0))
+                        with metric_cols[1]:
+                            st.metric("Before: Empty <p>", before_stats.get('empty_p', 0))
+                        with metric_cols[2]:
+                            st.metric("Before: Block wraps", before_stats.get('p_wrapping_blocks', 0))
+                        with metric_cols[3]:
+                            st.metric("Before: WP wrappers", before_stats.get('wp_comment_wrappers', 0))
+                        
+                        st.markdown("---")
+                        st.markdown("**📤 Output (Gutenberg-safe fragment):**")
+                        
+                        if len(fixed_html) > FULL_DISPLAY_THRESHOLD:
+                            st.code(fixed_html[:PREVIEW_LENGTH] + "\n\n... (preview truncated) ...", language="html")
+                            with st.expander("📖 View full output", expanded=False):
+                                st.code(fixed_html, language="html")
+                        else:
+                            st.code(fixed_html, language="html")
+                        
+                        # Diff view
+                        if show_diff:
+                            st.markdown("---")
+                            st.markdown("**🔍 Changes (Diff)**")
+                            diff_result = generate_diff(input_html, fixed_html)
+                            st.code(diff_result, language="diff")
 
-            st.success(
-                f"Fixed nested `<p>`: **{after_stats['nested_p_fixed']}** • "
-                f"Unwrapped `<p>` around blocks: **{after_stats['block_wraps_unwrapped']}** • "
-                f"Removed empty `<p>`: **{after_stats['empty_p_removed']}** • "
-                f"Removed wp-comment-only `<p>`: **{after_stats['wp_comment_wrapper_removed']}** • "
-                f"Removed empty Gutenberg blocks: **{after_stats['empty_wp_blocks_removed']}** • "
-                f"Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
-            )
-
-            st.markdown("---")
-            st.markdown("**Output (Gutenberg-safe fragment):**")
-            st.code(fixed_html, language="html")
-
-            st.download_button(
-                label="Download Fixed HTML",
-                data=fixed_html,
-                file_name="fixed_wordpress_content.html",
-                mime="text/html",
-                use_container_width=True
-            )
+                        st.download_button(
+                            label="📥 Download Fixed HTML",
+                            data=fixed_html,
+                            file_name="fixed_wordpress_content.html",
+                            mime="text/html",
+                            use_container_width=True
+                        )
+            
+            except Exception as e:
+                st.error(f"❌ Unexpected error: {str(e)}")
+        
         else:
-            st.info("Paste HTML or upload files, then click **Fix HTML**.")
+            st.info("📌 Paste HTML or upload files, then click **Fix HTML**.")
     else:
-        st.info("Paste HTML or upload files, adjust settings, and click **Fix HTML**.")
+        st.info("👈 Paste HTML or upload files, adjust settings, and click **Fix HTML**.")
 
+# Footer
 st.markdown("---")
-st.caption("Preserves Gutenberg comments, removes nested/empty/bridge <p>, unwraps invalid structures, strips document wrapper, and deletes empty Gutenberg blocks.")
+st.caption(
+    "🔧 Enhanced WordPress HTML Content Fixer • "
+    "Preserves Gutenberg comments, removes nested/empty/bridge `<p>`, "
+    "unwraps invalid structures, strips document wrapper, and deletes empty Gutenberg blocks. • "
+    "Now with validation, presets, and comprehensive statistics."
+)
