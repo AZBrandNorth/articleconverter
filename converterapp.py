@@ -463,17 +463,27 @@ def fix_html_content(
             prettify=prettify
         )
         
-        # FINAL CLEANUP: Simple find-and-replace to remove any remaining empty p-span tags
+        # FINAL CLEANUP: Simple find-and-replace to remove unwanted patterns
         # This catches edge cases that might have been missed
         before_final_cleanup = fixed
+        
+        # 1. Remove empty p-span tags
         fixed = re.sub(r'<p>\s*<span>\s*</span>\s*</p>\s*', '', fixed)
-        fixed = re.sub(r'<p><span></span></p>\s*', '', fixed)  # More specific pattern
-        fixed = re.sub(r'<!--/wp:paragraph-->\s*', '', fixed)
-        fixed = re.sub(r'<!-- wp:paragraph -->\s*', '', fixed)
+        fixed = re.sub(r'<p><span></span></p>\s*', '', fixed)
+        
+        # 2. Remove consecutive Gutenberg comment pairs
+        # Pattern: <!--/wp:paragraph-->\n<!-- wp:paragraph -->
+        fixed = re.sub(r'<!--/wp:paragraph-->\s*<!--\s*wp:paragraph\s*-->', '', fixed)
+        fixed = re.sub(r'<!--\s*/wp:paragraph\s*-->\s*<!--\s*wp:paragraph\s*-->', '', fixed)
+        
         # Count how many were removed in final cleanup
-        final_cleanup_count = before_final_cleanup.count('<p><span></span></p>')
-        if final_cleanup_count > 0:
-            stats["final_cleanup_removed"] = final_cleanup_count
+        empty_span_count = before_final_cleanup.count('<p><span></span></p>')
+        comment_pairs_removed = before_final_cleanup.count('<!--/wp:paragraph-->') - fixed.count('<!--/wp:paragraph-->')
+        
+        if empty_span_count > 0:
+            stats["final_cleanup_empty_span"] = empty_span_count
+        if comment_pairs_removed > 0:
+            stats["final_cleanup_comment_pairs"] = comment_pairs_removed
         
         return fixed, stats, parser
     
@@ -559,7 +569,7 @@ st.markdown(
     "Also removes **empty Gutenberg blocks** and `<p>` wrappers that contain only Gutenberg comments."
 )
 
-st.info("🆕 **New Features**: Automatically extracts Gutenberg comments from inside `<p>` tags, removes extra spaces in comment syntax, **and performs final cleanup to remove all `<p><span></span></p>` tags!**")
+st.info("🆕 **New Features**: Automatically extracts Gutenberg comments from inside `<p>` tags, removes extra spaces in comment syntax, **performs final cleanup to remove all `<p><span></span></p>` tags AND consecutive Gutenberg comment pairs!**")
 
 with st.expander("📦 System Status", expanded=False):
     st.write("**Parsers (best → fallback):**", ", ".join(PARSER_ORDER))
@@ -601,7 +611,7 @@ with st.sidebar.expander("🔬 Advanced Options"):
     run_test_suite = st.checkbox("Run test suite", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Enhanced version with Gutenberg comment fix + final regex cleanup • v2.2")
+st.sidebar.caption("Enhanced version with Gutenberg comment fix + final regex cleanup • v2.3")
 
 # Main content area
 col1, col2 = st.columns([1, 1])
@@ -805,7 +815,9 @@ with col2:
                         st.warning(f"⚠️ {after_stats['warning']}")
                     else:
                         # Success message with metrics
-                        final_cleanup = after_stats.get('final_cleanup_removed', 0)
+                        empty_span_cleanup = after_stats.get('final_cleanup_empty_span', 0)
+                        comment_pairs_cleanup = after_stats.get('final_cleanup_comment_pairs', 0)
+                        
                         success_msg = (
                             f"✅ **Fixed successfully!** • "
                             f"Nested `<p>`: **{after_stats['nested_p_fixed']}** • "
@@ -815,8 +827,17 @@ with col2:
                             f"Empty WP blocks: **{after_stats['empty_wp_blocks_removed']}** • "
                             f"Comments extracted: **{after_stats['comments_extracted_from_p']}**"
                         )
-                        if final_cleanup > 0:
-                            success_msg += f" • Final cleanup: **{final_cleanup}** `<p><span></span></p>` removed"
+                        
+                        # Add final cleanup stats if any
+                        cleanup_parts = []
+                        if empty_span_cleanup > 0:
+                            cleanup_parts.append(f"**{empty_span_cleanup}** `<p><span></span></p>`")
+                        if comment_pairs_cleanup > 0:
+                            cleanup_parts.append(f"**{comment_pairs_cleanup}** comment pairs")
+                        
+                        if cleanup_parts:
+                            success_msg += f" • Final cleanup: {' + '.join(cleanup_parts)} removed"
+                        
                         success_msg += f" • Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
                         
                         st.success(success_msg)
@@ -880,9 +901,9 @@ with col2:
 # Footer
 st.markdown("---")
 st.caption(
-    "🔧 Enhanced WordPress HTML Content Fixer v2.2 • "
+    "🔧 Enhanced WordPress HTML Content Fixer v2.3 • "
     "Preserves Gutenberg comments (with proper spacing!), extracts comments from inside `<p>` tags, removes nested/empty/bridge `<p>`, "
     "unwraps invalid structures, strips document wrapper, deletes empty Gutenberg blocks, "
-    "**and performs final regex cleanup of `<p><span></span></p>` tags**. • "
+    "**and performs final regex cleanup of `<p><span></span></p>` tags and consecutive comment pairs**. • "
     "Now with validation, presets, and comprehensive statistics."
 )
