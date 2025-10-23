@@ -1,12 +1,13 @@
 # app.py
-# WordPress HTML Content Fixer — removes nested <p>, optional empty <p>, and unwraps <p> around block elements.
+# WordPress HTML Content Fixer — removes nested <p>, optional empty <p>, unwraps <p> around block elements,
+# and outputs a clean fragment compatible with Gutenberg (no <html>/<body> wrapper).
 
 import streamlit as st
 
 # ---------------- Imports with graceful fallbacks ----------------
 PARSER_ORDER = []
 try:
-    from bs4 import BeautifulSoup, NavigableString, Tag
+    from bs4 import BeautifulSoup, NavigableString, Tag, Comment
     BS4_AVAILABLE = True
 except ImportError:
     BS4_AVAILABLE = False
@@ -69,7 +70,6 @@ def is_effectively_empty(tag: Tag) -> bool:
             return False
         if isinstance(child, NavigableString) and child.strip():
             return False
-
     text = tag.get_text(separator="", strip=True)
     text = text.replace("\xa0", "").replace("&nbsp;", "").strip()
     return text == ""
@@ -87,10 +87,7 @@ def unwrap_children(tag: Tag, child_name: str) -> int:
 
 
 def unwrap_p_around_block(p_tag: Tag) -> int:
-    """
-    If a <p> wraps block-level tags, unwrap the <p> entirely.
-    Returns 1 if unwrapped, else 0.
-    """
+    """If a <p> wraps block-level tags, unwrap the <p> entirely."""
     for c in p_tag.children:
         if isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS:
             p_tag.unwrap()
@@ -119,22 +116,18 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
 
         p_tags = list(soup.find_all("p"))
         for p in p_tags:
-            # 1) Fix nested <p> (deep)
             nested_count = unwrap_children(p, "p")
             if nested_count:
                 total_nested_fixes += nested_count
                 changed = True
 
-            # 2) Unwrap <p> around block-levels
             if unwrap_block_wrapped_p and p.parent:
                 unwrapped = unwrap_p_around_block(p)
                 if unwrapped:
                     total_unwrapped_block += unwrapped
                     changed = True
-                    # p is gone now; continue to next original p
                     continue
 
-            # 3) Optionally remove empty <p>
             if remove_empty and p and p.name == "p" and is_effectively_empty(p):
                 p.decompose()
                 total_empty_removed += 1
@@ -164,14 +157,37 @@ def analyze_issues(html: str, parser: str):
     return {"nested_p": nested, "p_wrapping_blocks": block_wraps, "empty_p": empties}
 
 
+def serialize_fragment(soup: BeautifulSoup, strip_document_wrapper: bool = True, prettify: bool = False) -> str:
+    """
+    Return HTML suitable for pasting into Gutenberg:
+    - If body exists and strip_document_wrapper=True → join body children (preserves comments).
+    - Else → string of soup.
+    """
+    if strip_document_wrapper and getattr(soup, "body", None):
+        # Join children of <body> without adding <html>/<body> wrappers
+        parts = []
+        for node in soup.body.children:
+            # Preserve everything, including <!-- wp:* --> comments
+            parts.append(str(node))
+        html = "".join(parts)
+    else:
+        html = str(soup)
+
+    if prettify:
+        # Prettify only if user asked; can alter whitespace
+        return BeautifulSoup(html, "html.parser").prettify()
+    return html
+
+
 def fix_html_content(
     html: str,
     remove_empty: bool = True,
     unwrap_block_wrapped_p: bool = True,
     prettify: bool = False,
-    parser: str | None = None
+    parser: str | None = None,
+    strip_document_wrapper: bool = True
 ):
-    """Main fix function; robust & idempotent."""
+    """Main fix function; robust & idempotent with Gutenberg-safe fragment output."""
     parser = parser or pick_parser()
     soup = BeautifulSoup(html, parser)
     stats = normalize_paragraphs(
@@ -179,7 +195,7 @@ def fix_html_content(
         remove_empty=remove_empty,
         unwrap_block_wrapped_p=unwrap_block_wrapped_p
     )
-    fixed = soup.prettify() if prettify else str(soup)
+    fixed = serialize_fragment(soup, strip_document_wrapper=strip_document_wrapper, prettify=prettify)
     return fixed, stats, parser
 
 
@@ -187,7 +203,7 @@ def fix_html_content(
 st.title("WordPress HTML Content Fixer")
 st.markdown(
     "Remove **nested `<p>` tags**, optionally strip **empty paragraphs**, and fix `<p>` "
-    "wrapping **block-level elements** (a common cause of the WP *“unexpected/invalid content”* error)."
+    "wrapping **block-level elements**. Output is a **Gutenberg-safe fragment** (no `<html>/<body>`)."
 )
 
 with st.expander("📦 System Status", expanded=False):
@@ -213,6 +229,11 @@ prettify_opt = st.sidebar.checkbox(
     "Prettify output (formatted)",
     value=False,
     help="Prettify adds indentation/newlines. Turn off for compact HTML."
+)
+strip_wrapper_opt = st.sidebar.checkbox(
+    "Strip <html>/<body> wrapper (recommended)",
+    value=True,
+    help="Ensures the output is a fragment suitable for Gutenberg blocks."
 )
 parser_choice = st.sidebar.selectbox(
     "Parser to use",
@@ -241,10 +262,9 @@ with col2:
     st.subheader("Fixed HTML")
 
     if run_btn:
-        # Choose parser
         selected_parser = None if parser_choice == "auto" else parser_choice
 
-        # Case A: Batch files
+        # Batch files
         if uploaded_files:
             st.markdown("### Batch Results")
             for f in uploaded_files:
@@ -255,7 +275,8 @@ with col2:
                     remove_empty=remove_empty_opt,
                     unwrap_block_wrapped_p=unwrap_block_opt,
                     prettify=prettify_opt,
-                    parser=selected_parser
+                    parser=selected_parser,
+                    strip_document_wrapper=strip_wrapper_opt
                 )
 
                 with st.expander(f"📄 {f.name}  •  Parser: `{used_parser}`", expanded=False):
@@ -277,7 +298,7 @@ with col2:
                         use_container_width=True
                     )
 
-        # Case B: Single text input
+        # Single input
         elif input_html and input_html.strip():
             before_stats = analyze_issues(input_html, pick_parser() if selected_parser is None else selected_parser)
             fixed_html, after_stats, used_parser = fix_html_content(
@@ -285,7 +306,8 @@ with col2:
                 remove_empty=remove_empty_opt,
                 unwrap_block_wrapped_p=unwrap_block_opt,
                 prettify=prettify_opt,
-                parser=selected_parser
+                parser=selected_parser,
+                strip_document_wrapper=strip_wrapper_opt
             )
 
             if before_stats["nested_p"] or before_stats["p_wrapping_blocks"]:
@@ -299,8 +321,8 @@ with col2:
                 st.success(f"No nested `<p>` found. Parser: `{used_parser}`")
 
             st.markdown("---")
-            ex_before = '<p><span><p>content here</p></span></p>'
-            ex_after = '<p><span>content here</span></p>'
+            ex_before = '<!-- wp:paragraph --><p><span><p>content here</p></span></p><!-- /wp:paragraph -->'
+            ex_after  = '<!-- wp:paragraph --><p><span>content here</span></p><!-- /wp:paragraph -->'
             with st.expander("Example Fix", expanded=False):
                 cb, ca = st.columns(2)
                 with cb:
@@ -311,7 +333,7 @@ with col2:
                     st.code(ex_after, language="html")
 
             st.markdown("---")
-            st.markdown("**Output:**")
+            st.markdown("**Output (Gutenberg-safe fragment):**")
             st.code(fixed_html, language="html")
 
             st.download_button(
@@ -327,4 +349,4 @@ with col2:
         st.info("Paste HTML or upload files, adjust settings in the sidebar, and click **Fix HTML**.")
 
 st.markdown("---")
-st.caption("Recursively removes nested `<p>`, optionally removes empty `<p>`, and unwraps `<p>` that wrap block elements to reduce WordPress block errors.")
+st.caption("Recursively removes nested `<p>`, optionally removes empty `<p>`, unwraps `<p>` that wrap block elements, and outputs a clean Gutenberg fragment (no `<html>/<body>`).")
