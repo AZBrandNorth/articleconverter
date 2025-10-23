@@ -98,15 +98,32 @@ def pick_parser() -> str:
     return PARSER_ORDER[0] if PARSER_ORDER else "html.parser"
 
 def is_effectively_empty(tag: Tag) -> bool:
-    """True if <p> has no visible text and no meaningful inline content (br is ignored)."""
+    """
+    True if <p> has no visible text and no meaningful inline content (br is ignored).
+    This includes paragraphs with only empty inline tags like <span></span>, <em></em>, etc.
+    """
     for child in tag.children:
         if isinstance(child, Tag):
             if child.name == "br":
-                continue
+                continue  # ignore line breaks
             if child.name in NON_EMPTY_INLINE_OK:
+                return False  # has meaningful media content
+            
+            # Recursively check if the child tag has any content
+            # This catches empty <span>, <em>, <strong>, <a>, etc.
+            child_text = child.get_text(separator="", strip=True)
+            child_text = child_text.replace("\xa0", "").replace("&nbsp;", "").strip()
+            if child_text:
+                return False  # child has text content
+            
+            # Check if child has any meaningful descendants (images, etc.)
+            if any(isinstance(d, Tag) and d.name in NON_EMPTY_INLINE_OK for d in child.descendants):
                 return False
+                
         if isinstance(child, NavigableString) and child.strip():
             return False
+    
+    # Final check: get all text from tag and descendants
     text = tag.get_text(separator="", strip=True)
     text = text.replace("\xa0", "").replace("&nbsp;", "").strip()
     return text == ""
@@ -302,6 +319,7 @@ def analyze_issues(html: str, parser: str) -> Dict:
         nested = 0
         block_wraps = 0
         empties = 0
+        empty_with_span = 0
         wp_comment_wrappers = 0
         comments_in_p = 0
         
@@ -309,8 +327,14 @@ def analyze_issues(html: str, parser: str) -> Dict:
             nested += len(p.find_all("p"))
             if any(isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS for c in p.children):
                 block_wraps += 1
+            
+            # Check if empty
             if is_effectively_empty(p):
                 empties += 1
+                # Check if it has span tags (even if empty)
+                if p.find("span"):
+                    empty_with_span += 1
+            
             if p_is_wp_comment_wrapper(p):
                 wp_comment_wrappers += 1
             
@@ -325,6 +349,7 @@ def analyze_issues(html: str, parser: str) -> Dict:
             "nested_p": nested,
             "p_wrapping_blocks": block_wraps,
             "empty_p": empties,
+            "empty_p_with_span": empty_with_span,
             "wp_comment_wrappers": wp_comment_wrappers,
             "wp_comments_in_p": comments_in_p
         }
@@ -470,6 +495,14 @@ def run_tests() -> Dict[str, bool]:
         },
         "empty_p": {
             "input": "<p></p><p>Content</p>",
+            "check": lambda fixed: fixed.count("<p>") == 1
+        },
+        "empty_p_with_span": {
+            "input": "<p><span></span></p><p>Content</p>",
+            "check": lambda fixed: "<span></span>" not in fixed and fixed.count("<p>") == 1
+        },
+        "empty_p_with_nested_empty_tags": {
+            "input": "<p><span><em></em></span></p><p>Content</p>",
             "check": lambda fixed: fixed.count("<p>") == 1
         },
         "p_wrap_div": {
@@ -787,9 +820,9 @@ with col2:
                         with metric_cols[1]:
                             st.metric("Before: Empty <p>", before_stats.get('empty_p', 0))
                         with metric_cols[2]:
-                            st.metric("Before: Block wraps", before_stats.get('p_wrapping_blocks', 0))
+                            st.metric("Before: <p> with <span>", before_stats.get('empty_p_with_span', 0))
                         with metric_cols[3]:
-                            st.metric("Before: WP wrappers", before_stats.get('wp_comment_wrappers', 0))
+                            st.metric("Before: Block wraps", before_stats.get('p_wrapping_blocks', 0))
                         with metric_cols[4]:
                             st.metric("Before: Comments in <p>", before_stats.get('wp_comments_in_p', 0))
                         
