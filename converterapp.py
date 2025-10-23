@@ -468,7 +468,8 @@ def fix_html_content(
         before_final_cleanup = fixed
         fixed = re.sub(r'<p>\s*<span>\s*</span>\s*</p>\s*', '', fixed)
         fixed = re.sub(r'<p><span></span></p>\s*', '', fixed)  # More specific pattern
-        
+        fixed = re.sub(r'<!--/wp:paragraph-->\s*', '', fixed)
+        fixed = re.sub(r'<!-- wp:paragraph -->\s*', '', fixed)
         # Count how many were removed in final cleanup
         final_cleanup_count = before_final_cleanup.count('<p><span></span></p>')
         if final_cleanup_count > 0:
