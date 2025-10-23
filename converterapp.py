@@ -1,14 +1,16 @@
 # app.py
-# WordPress HTML Content Fixer - Enhanced Version
+# WordPress HTML Content Fixer - Enhanced Version with Gutenberg Comment Fix
 # - Removes nested <p>, optional empty <p>, and <p> wrapping block elements
 # - Preserves Gutenberg block comments, strips document wrapper
 # - Removes empty Gutenberg blocks (<!-- wp:* -->...<!-- /wp:* -->)
 # - Removes <p> wrappers that contain ONLY Gutenberg comments (and optional <br>/whitespace)
+# - FIXES: Gutenberg comments with extra spaces and comments inside <p> tags
 # - Enhanced with error handling, validation, presets, and detailed statistics
 
 import streamlit as st
 import difflib
 from typing import Optional, Dict, List, Tuple
+import re
 
 # ---------------- Imports with graceful fallbacks ----------------
 PARSER_ORDER = []
@@ -150,9 +152,41 @@ def p_is_wp_comment_wrapper(p: Tag) -> bool:
             return False
     return True
 
+def extract_comments_from_p_tags(soup: BeautifulSoup) -> int:
+    """
+    Extract Gutenberg comments that are wrongly placed inside <p> tags.
+    Move them outside the <p> tags to their proper location.
+    """
+    fixed_count = 0
+    
+    for p in soup.find_all("p"):
+        # Find all comment children
+        comments_to_move = []
+        for child in list(p.children):
+            if isinstance(child, Comment):
+                comment_text = str(child).strip()
+                if comment_text.startswith("wp:") or comment_text.startswith("/wp:"):
+                    comments_to_move.append(child)
+        
+        if comments_to_move:
+            # Move comments outside the paragraph
+            for comment in comments_to_move:
+                # Extract the comment
+                comment.extract()
+                # Insert it after the paragraph
+                p.insert_after(comment)
+                fixed_count += 1
+            
+            # If paragraph is now empty (only had comments and maybe br tags), remove it
+            if is_effectively_empty(p):
+                p.decompose()
+    
+    return fixed_count
+
 def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_wrapped_p: bool):
     """
     Recursively:
+      - Extract Gutenberg comments from inside <p> tags
       - Unwrap nested <p> inside <p>
       - Remove <p> that are ONLY Gutenberg comment wrappers
       - Optionally remove empty <p>
@@ -162,8 +196,12 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
     total_empty_removed = 0
     total_unwrapped_block = 0
     total_wp_comment_wrapper_removed = 0
+    total_comments_extracted = 0
     changed = True
     safety_counter = 0
+
+    # First pass: extract comments from inside p tags
+    total_comments_extracted = extract_comments_from_p_tags(soup)
 
     while changed and safety_counter < 50:
         changed = False
@@ -202,6 +240,7 @@ def normalize_paragraphs(soup: BeautifulSoup, remove_empty: bool, unwrap_block_w
         "empty_p_removed": total_empty_removed,
         "block_wraps_unwrapped": total_unwrapped_block,
         "wp_comment_wrapper_removed": total_wp_comment_wrapper_removed,
+        "comments_extracted_from_p": total_comments_extracted,
         "iterations": safety_counter
     }
 
@@ -264,6 +303,8 @@ def analyze_issues(html: str, parser: str) -> Dict:
         block_wraps = 0
         empties = 0
         wp_comment_wrappers = 0
+        comments_in_p = 0
+        
         for p in soup.find_all("p"):
             nested += len(p.find_all("p"))
             if any(isinstance(c, Tag) and c.name in BLOCK_LEVEL_TAGS for c in p.children):
@@ -272,11 +313,20 @@ def analyze_issues(html: str, parser: str) -> Dict:
                 empties += 1
             if p_is_wp_comment_wrapper(p):
                 wp_comment_wrappers += 1
+            
+            # Count WP comments inside p tags
+            for child in p.children:
+                if isinstance(child, Comment):
+                    comment_text = str(child).strip()
+                    if comment_text.startswith("wp:") or comment_text.startswith("/wp:"):
+                        comments_in_p += 1
+        
         return {
             "nested_p": nested,
             "p_wrapping_blocks": block_wraps,
             "empty_p": empties,
-            "wp_comment_wrappers": wp_comment_wrappers
+            "wp_comment_wrappers": wp_comment_wrappers,
+            "wp_comments_in_p": comments_in_p
         }
     except Exception as e:
         return {"error": str(e)}
@@ -299,6 +349,17 @@ def validate_html(html: str, parser: str) -> Dict:
                 issues.append("Still has <p> wrapping block elements")
                 break
         
+        # Check for WP comments inside <p> tags
+        for p in soup.find_all("p"):
+            for child in p.children:
+                if isinstance(child, Comment):
+                    comment_text = str(child).strip()
+                    if comment_text.startswith("wp:") or comment_text.startswith("/wp:"):
+                        issues.append("Still has Gutenberg comments inside <p> tags")
+                        break
+            if issues and "Gutenberg comments" in issues[-1]:
+                break
+        
         return {
             "valid": len(issues) == 0,
             "issues": issues if issues else ["All checks passed"]
@@ -310,10 +371,18 @@ def validate_html(html: str, parser: str) -> Dict:
         }
 
 def serialize_fragment(soup: BeautifulSoup, strip_document_wrapper: bool = True, prettify: bool = False) -> str:
-    """Return HTML suitable for Gutenberg."""
+    """
+    Return HTML suitable for Gutenberg.
+    CRITICAL FIX: Remove extra spaces from Gutenberg comments.
+    """
     def to_html(node) -> str:
         if isinstance(node, Comment):
-            return f"<!-- {node} -->"
+            comment_text = str(node).strip()
+            # Fix: Remove extra spaces in Gutenberg comments
+            if comment_text.startswith("wp:") or comment_text.startswith("/wp:"):
+                # Return without extra spaces
+                return f"<!--{comment_text}-->"
+            return f"<!-- {comment_text} -->"
         return str(node)
 
     if strip_document_wrapper and getattr(soup, "body", None):
@@ -326,6 +395,10 @@ def serialize_fragment(soup: BeautifulSoup, strip_document_wrapper: bool = True,
     else:
         html = str(soup)
 
+    # Additional regex cleanup for any remaining malformed comments
+    # Fix: <!--  wp:  --> to <!-- wp: -->
+    html = re.sub(r'<!--\s+(/?wp:[^>]+?)\s+-->', r'<!--\1-->', html)
+    
     if prettify:
         return BeautifulSoup(html, "html.parser").prettify()
     return html
@@ -407,6 +480,14 @@ def run_tests() -> Dict[str, bool]:
             "input": "<p><!-- wp:paragraph --></p>",
             "check": lambda fixed: "<p><!--" not in fixed
         },
+        "wp_comment_inside_p": {
+            "input": "<p>Text<!-- wp:paragraph -->more text</p>",
+            "check": lambda fixed: "<p>Text<!--" not in fixed and "<!--wp:paragraph-->" in fixed
+        },
+        "wp_comment_spacing": {
+            "input": "<!--  wp:paragraph  --><p>Content</p><!--  /wp:paragraph  -->",
+            "check": lambda fixed: "<!--wp:paragraph-->" in fixed and "<!--/wp:paragraph-->" in fixed
+        },
         "multiple_nested": {
             "input": "<p><p><p>Deep nest</p></p></p>",
             "check": lambda fixed: fixed.count("<p>") == 1
@@ -427,9 +508,12 @@ def run_tests() -> Dict[str, bool]:
 st.title("🔧 WordPress HTML Content Fixer")
 st.markdown(
     "Fix nested `<p>` tags, remove empty/bridge `<p>`, unwrap `<p>` around block elements, "
-    "and output a **Gutenberg-safe fragment** (preserves block comments, no `<html>/<body>`). "
+    "**extract Gutenberg comments from inside paragraphs**, and output a **Gutenberg-safe fragment** "
+    "(preserves block comments with proper spacing, no `<html>/<body>`). "
     "Also removes **empty Gutenberg blocks** and `<p>` wrappers that contain only Gutenberg comments."
 )
+
+st.info("🆕 **New Fix**: Automatically extracts Gutenberg comments from inside `<p>` tags and removes extra spaces in comment syntax!")
 
 with st.expander("📦 System Status", expanded=False):
     st.write("**Parsers (best → fallback):**", ", ".join(PARSER_ORDER))
@@ -471,7 +555,7 @@ with st.sidebar.expander("🔬 Advanced Options"):
     run_test_suite = st.checkbox("Run test suite", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Enhanced version with validation, presets & statistics")
+st.sidebar.caption("Enhanced version with Gutenberg comment fix • v2.1")
 
 # Main content area
 col1, col2 = st.columns([1, 1])
@@ -564,13 +648,15 @@ with col2:
 
                     with st.expander(f"📄 {f.name}  •  Parser: `{used_parser}`  •  Size: {file_size/1024:.1f}KB", expanded=False):
                         # Summary metrics
-                        metric_cols = st.columns(3)
+                        metric_cols = st.columns(4)
                         with metric_cols[0]:
                             st.metric("Nested <p> Fixed", after_stats.get('nested_p_fixed', 0))
                         with metric_cols[1]:
                             st.metric("Empty <p> Removed", after_stats.get('empty_p_removed', 0))
                         with metric_cols[2]:
                             st.metric("Blocks Unwrapped", after_stats.get('block_wraps_unwrapped', 0))
+                        with metric_cols[3]:
+                            st.metric("Comments Extracted", after_stats.get('comments_extracted_from_p', 0))
                         
                         # Validation results
                         if show_validation and validation:
@@ -628,7 +714,7 @@ with col2:
             if all_stats:
                 st.markdown("---")
                 st.markdown("### 📈 Overall Statistics")
-                dash_cols = st.columns(4)
+                dash_cols = st.columns(5)
                 
                 with dash_cols[0]:
                     st.metric("Files Processed", len(all_stats))
@@ -641,6 +727,9 @@ with col2:
                 with dash_cols[3]:
                     total_blocks = sum(s.get('empty_wp_blocks_removed', 0) for s in all_stats)
                     st.metric("Total WP Blocks Removed", total_blocks)
+                with dash_cols[4]:
+                    total_extracted = sum(s.get('comments_extracted_from_p', 0) for s in all_stats)
+                    st.metric("Comments Extracted", total_extracted)
 
         # Single text input
         elif input_html and input_html.strip():
@@ -677,6 +766,7 @@ with col2:
                             f"Empty `<p>`: **{after_stats['empty_p_removed']}** • "
                             f"WP-comment-only `<p>`: **{after_stats['wp_comment_wrapper_removed']}** • "
                             f"Empty WP blocks: **{after_stats['empty_wp_blocks_removed']}** • "
+                            f"Comments extracted: **{after_stats['comments_extracted_from_p']}** • "
                             f"Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
                         )
                         
@@ -691,7 +781,7 @@ with col2:
                         st.markdown("---")
                         
                         # Metrics dashboard
-                        metric_cols = st.columns(4)
+                        metric_cols = st.columns(5)
                         with metric_cols[0]:
                             st.metric("Before: Nested <p>", before_stats.get('nested_p', 0))
                         with metric_cols[1]:
@@ -700,6 +790,8 @@ with col2:
                             st.metric("Before: Block wraps", before_stats.get('p_wrapping_blocks', 0))
                         with metric_cols[3]:
                             st.metric("Before: WP wrappers", before_stats.get('wp_comment_wrappers', 0))
+                        with metric_cols[4]:
+                            st.metric("Before: Comments in <p>", before_stats.get('wp_comments_in_p', 0))
                         
                         st.markdown("---")
                         st.markdown("**📤 Output (Gutenberg-safe fragment):**")
@@ -737,8 +829,8 @@ with col2:
 # Footer
 st.markdown("---")
 st.caption(
-    "🔧 Enhanced WordPress HTML Content Fixer • "
-    "Preserves Gutenberg comments, removes nested/empty/bridge `<p>`, "
+    "🔧 Enhanced WordPress HTML Content Fixer v2.1 • "
+    "Preserves Gutenberg comments (with proper spacing!), extracts comments from inside `<p>` tags, removes nested/empty/bridge `<p>`, "
     "unwraps invalid structures, strips document wrapper, and deletes empty Gutenberg blocks. • "
     "Now with validation, presets, and comprehensive statistics."
 )
