@@ -462,6 +462,18 @@ def fix_html_content(
             strip_document_wrapper=strip_document_wrapper,
             prettify=prettify
         )
+        
+        # FINAL CLEANUP: Simple find-and-replace to remove any remaining empty p-span tags
+        # This catches edge cases that might have been missed
+        before_final_cleanup = fixed
+        fixed = re.sub(r'<p>\s*<span>\s*</span>\s*</p>\s*', '', fixed)
+        fixed = re.sub(r'<p><span></span></p>\s*', '', fixed)  # More specific pattern
+        
+        # Count how many were removed in final cleanup
+        final_cleanup_count = before_final_cleanup.count('<p><span></span></p>')
+        if final_cleanup_count > 0:
+            stats["final_cleanup_removed"] = final_cleanup_count
+        
         return fixed, stats, parser
     
     except Exception as e:
@@ -546,7 +558,7 @@ st.markdown(
     "Also removes **empty Gutenberg blocks** and `<p>` wrappers that contain only Gutenberg comments."
 )
 
-st.info("🆕 **New Fix**: Automatically extracts Gutenberg comments from inside `<p>` tags and removes extra spaces in comment syntax!")
+st.info("🆕 **New Features**: Automatically extracts Gutenberg comments from inside `<p>` tags, removes extra spaces in comment syntax, **and performs final cleanup to remove all `<p><span></span></p>` tags!**")
 
 with st.expander("📦 System Status", expanded=False):
     st.write("**Parsers (best → fallback):**", ", ".join(PARSER_ORDER))
@@ -588,7 +600,7 @@ with st.sidebar.expander("🔬 Advanced Options"):
     run_test_suite = st.checkbox("Run test suite", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Enhanced version with Gutenberg comment fix • v2.1")
+st.sidebar.caption("Enhanced version with Gutenberg comment fix + final regex cleanup • v2.2")
 
 # Main content area
 col1, col2 = st.columns([1, 1])
@@ -792,16 +804,21 @@ with col2:
                         st.warning(f"⚠️ {after_stats['warning']}")
                     else:
                         # Success message with metrics
-                        st.success(
+                        final_cleanup = after_stats.get('final_cleanup_removed', 0)
+                        success_msg = (
                             f"✅ **Fixed successfully!** • "
                             f"Nested `<p>`: **{after_stats['nested_p_fixed']}** • "
                             f"Unwrapped blocks: **{after_stats['block_wraps_unwrapped']}** • "
                             f"Empty `<p>`: **{after_stats['empty_p_removed']}** • "
                             f"WP-comment-only `<p>`: **{after_stats['wp_comment_wrapper_removed']}** • "
                             f"Empty WP blocks: **{after_stats['empty_wp_blocks_removed']}** • "
-                            f"Comments extracted: **{after_stats['comments_extracted_from_p']}** • "
-                            f"Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
+                            f"Comments extracted: **{after_stats['comments_extracted_from_p']}**"
                         )
+                        if final_cleanup > 0:
+                            success_msg += f" • Final cleanup: **{final_cleanup}** `<p><span></span></p>` removed"
+                        success_msg += f" • Parser: `{used_parser}` • Passes: {after_stats['iterations']}"
+                        
+                        st.success(success_msg)
                         
                         # Validation
                         if show_validation:
@@ -862,8 +879,9 @@ with col2:
 # Footer
 st.markdown("---")
 st.caption(
-    "🔧 Enhanced WordPress HTML Content Fixer v2.1 • "
+    "🔧 Enhanced WordPress HTML Content Fixer v2.2 • "
     "Preserves Gutenberg comments (with proper spacing!), extracts comments from inside `<p>` tags, removes nested/empty/bridge `<p>`, "
-    "unwraps invalid structures, strips document wrapper, and deletes empty Gutenberg blocks. • "
+    "unwraps invalid structures, strips document wrapper, deletes empty Gutenberg blocks, "
+    "**and performs final regex cleanup of `<p><span></span></p>` tags**. • "
     "Now with validation, presets, and comprehensive statistics."
 )
